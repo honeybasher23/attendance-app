@@ -95,14 +95,13 @@ export default function Home() {
         options: { clearSessionCache: false, clearData: false }
       });
 
-      // 2. Listen for navigation to the attendance page
-      // 2. Listen for navigation to the attendance page
+      // 2. Listen for navigation
       InAppBrowser.addListener('browserPageNavigationCompleted', async (event) => {
         const url = event.url.toLowerCase();
 
+        // SCENARIO A: We reached the Attendance page -> Wait 3 seconds, Scrape, and Close
         if (url.includes('attendance/default.aspx')) {
           
-          // WAIT 3 SECONDS for the ERP server to draw the table on the screen
           setTimeout(async () => {
             const scrapeScript = `
               (function() {
@@ -144,26 +143,20 @@ export default function Home() {
                 await Preferences.set({ key: 'attendance_data', value: result.value });
                 await InAppBrowser.close();
               } else {
-                // Debugging: If it fails, tell you exactly why inside the browser
+                // Debugging: If it fails, tell you exactly why
                 await InAppBrowser.executeScript({
                   code: `alert("Scrape failed. Reason: ${parsed.error || '0 rows found'}. The table might take longer to load.");`
                 });
               }
             }
-          }, 3000); // 3000 milliseconds = 3 seconds delay
-        }
-        });
-
-          const result = await InAppBrowser.executeScript({ code: scrapeScript });
-          
-          if (result && result.value) {
-            const parsed = JSON.parse(result.value);
-            if (!parsed.error && parsed.length > 0) {
-              setSubjects(parsed);
-              await Preferences.set({ key: 'attendance_data', value: result.value });
-              await InAppBrowser.close();
-            }
-          }
+          }, 3000); 
+        } 
+        
+        // SCENARIO B: Logged in and on the dashboard -> Auto-navigate to Attendance
+        else if (url.includes('dashboard') && !url.includes('attendance')) {
+          await InAppBrowser.executeScript({
+            code: `window.location.href = '/ERP/Dashboard/Student/Attendance/Default.aspx';`
+          });
         }
       });
     } catch (error) {
