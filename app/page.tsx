@@ -89,30 +89,56 @@ export default function Home() {
     setIsSyncing(true);
     
     try {
-      // 1. Open the ABES ERP Login Page
+      // Clear old listeners for a clean state
+      await InAppBrowser.removeAllListeners();
+
       await InAppBrowser.openInWebView({
         url: 'https://erp.abes.ac.in/', 
         options: { clearSessionCache: false, clearData: false }
       });
 
-      // 2. Listen for navigation
       InAppBrowser.addListener('browserPageNavigationCompleted', async (event) => {
         const url = event.url.toLowerCase();
 
-        // SCENARIO A: We reached the Attendance page -> Wait 3 seconds, Scrape, and Close
-        if (url.includes('attendance/default.aspx')) {
+        // ---------------------------------------------------------
+        // STATE 1: Post-Login Dashboard -> Redirect to Attendance
+        // ---------------------------------------------------------
+        if (url.includes('home/student/default.aspx')) {
+          await InAppBrowser.executeScript({
+            code: `
+              let banner = document.createElement('div');
+              banner.innerText = 'Bypassing Dashboard...';
+              banner.style.cssText = 'position:fixed; top:0; left:0; width:100%; background:#10b981; color:white; text-align:center; padding:12px; z-index:99999; font-family:sans-serif; font-weight:bold;';
+              document.body.appendChild(banner);
+              
+              // Short delay to ensure session cookies register before jumping
+              setTimeout(() => {
+                window.location.href = '/ERP/Dashboard/Student/Attendance/Default.aspx';
+              }, 1000);
+            `
+          });
+        }
+        
+        // ---------------------------------------------------------
+        // STATE 2: Attendance Page -> Smart Poll for Data
+        // ---------------------------------------------------------
+        else if (url.includes('attendance/default.aspx')) {
           
-          setTimeout(async () => {
+          let attempts = 0;
+          const maxAttempts = 20; // 20 attempts * 500ms = 10 seconds max wait
+          
+          const pollForData = setInterval(async () => {
+            attempts++;
+            
             const scrapeScript = `
               (function() {
                 try {
-                  // Safety check: Does the table exist yet?
-                  let table = document.querySelector('table#sample_1');
-                  if (!table) return JSON.stringify({ error: 'Table not rendered' });
-
                   let rows = document.querySelectorAll('table#sample_1 tbody tr'); 
-                  let data = [];
                   
+                  // If the table hasn't rendered rows yet, return null to keep waiting
+                  if (rows.length === 0) return 'WAITING';
+                  
+                  let data = [];
                   rows.forEach((row, i) => {
                     let cols = row.querySelectorAll('td');
                     if (cols.length >= 6) {
@@ -127,36 +153,32 @@ export default function Home() {
                   });
                   return JSON.stringify(data);
                 } catch (e) {
-                  return JSON.stringify({ error: e.toString() });
+                  return 'ERROR: ' + e.toString();
                 }
               })();
             `;
 
             const result = await InAppBrowser.executeScript({ code: scrapeScript });
             
-            if (result && result.value) {
-              const parsed = JSON.parse(result.value);
+            // If we successfully grabbed the JSON array (not 'WAITING' or 'ERROR')
+            if (result && result.value && result.value.startsWith('[')) {
+              clearInterval(pollForData); // Stop polling
               
-              if (!parsed.error && parsed.length > 0) {
-                // Success: Save data and close window
+              const parsed = JSON.parse(result.value);
+              if (parsed.length > 0) {
                 setSubjects(parsed);
                 await Preferences.set({ key: 'attendance_data', value: result.value });
                 await InAppBrowser.close();
-              } else {
-                // Debugging: If it fails, tell you exactly why
-                await InAppBrowser.executeScript({
-                  code: `alert("Scrape failed. Reason: ${parsed.error || '0 rows found'}. The table might take longer to load.");`
-                });
               }
+            } 
+            // Handle maximum timeout (ERP is down or table structure changed)
+            else if (attempts >= maxAttempts) {
+              clearInterval(pollForData);
+              await InAppBrowser.executeScript({
+                code: `alert("Sync failed: The attendance table took longer than 10 seconds to load.");`
+              });
             }
-          }, 3000); 
-        } 
-        
-        // SCENARIO B: Logged in and on the dashboard -> Auto-navigate to Attendance
-        else if (url.includes('dashboard') && !url.includes('attendance')) {
-          await InAppBrowser.executeScript({
-            code: `window.location.href = '/ERP/Dashboard/Student/Attendance/Default.aspx';`
-          });
+          }, 500); // Check every half-second
         }
       });
     } catch (error) {
