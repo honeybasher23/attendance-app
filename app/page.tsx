@@ -89,103 +89,102 @@ export default function Home() {
     setIsSyncing(true);
     
     try {
-      // Clear old listeners for a clean state
-      await InAppBrowser.removeAllListeners();
-
       await InAppBrowser.openInWebView({
         url: 'https://erp.abes.ac.in/', 
         options: { clearSessionCache: false, clearData: false }
       });
 
-      InAppBrowser.addListener('browserPageNavigationCompleted', async (event) => {
-        const url = event.url.toLowerCase();
+      // ---------------------------------------------------------
+      // THE ACTIVE POLLING ENGINE
+      // Runs every 1 second to manually check the browser's state
+      // ---------------------------------------------------------
+      const syncLoop = setInterval(async () => {
+        try {
+          // 1. Ask the browser for its current URL
+          const urlResult = await InAppBrowser.executeScript({ code: `window.location.href` });
+          if (!urlResult || !urlResult.value) return;
+          
+          const currentUrl = urlResult.value.toLowerCase();
 
-        // ---------------------------------------------------------
-        // STATE 1: Post-Login Dashboard -> Redirect to Attendance
-        // ---------------------------------------------------------
-        if (url.includes('home/student/default.aspx')) {
-          await InAppBrowser.executeScript({
-            code: `
-              let banner = document.createElement('div');
-              banner.innerText = 'Bypassing Dashboard...';
-              banner.style.cssText = 'position:fixed; top:0; left:0; width:100%; background:#10b981; color:white; text-align:center; padding:12px; z-index:99999; font-family:sans-serif; font-weight:bold;';
-              document.body.appendChild(banner);
-              
-              // Short delay to ensure session cookies register before jumping
-              setTimeout(() => {
-                window.location.href = '/ERP/Dashboard/Student/Attendance/Default.aspx';
-              }, 1000);
-            `
-          });
-        }
-        
-        // ---------------------------------------------------------
-        // STATE 2: Attendance Page -> Smart Poll for Data
-        // ---------------------------------------------------------
-        else if (url.includes('attendance/default.aspx')) {
+          // STATE A: Detected the Dashboard -> Force Redirect
+          if (currentUrl.includes('home/student/default.aspx')) {
+            await InAppBrowser.executeScript({
+              code: `
+                // Only inject if we haven't already
+                if (!document.getElementById('sync-banner')) {
+                  let banner = document.createElement('div');
+                  banner.id = 'sync-banner';
+                  banner.innerText = 'Redirecting to Attendance...';
+                  banner.style.cssText = 'position:fixed; top:0; left:0; width:100%; background:#10b981; color:white; text-align:center; padding:12px; z-index:999999; font-family:sans-serif; font-weight:bold; box-shadow: 0 4px 6px rgba(0,0,0,0.1);';
+                  document.body.appendChild(banner);
+                  
+                  window.location.href = '/ERP/Dashboard/Student/Attendance/Default.aspx';
+                }
+              `
+            });
+          }
           
-          let attempts = 0;
-          const maxAttempts = 20; // 20 attempts * 500ms = 10 seconds max wait
-          
-          const pollForData = setInterval(async () => {
-            attempts++;
-            
+          // STATE B: Detected Attendance Page -> Attempt Scrape
+          else if (currentUrl.includes('attendance/default.aspx')) {
             const scrapeScript = `
               (function() {
-                try {
-                  let rows = document.querySelectorAll('table#sample_1 tbody tr'); 
-                  
-                  // If the table hasn't rendered rows yet, return null to keep waiting
-                  if (rows.length === 0) return 'WAITING';
-                  
-                  let data = [];
-                  rows.forEach((row, i) => {
-                    let cols = row.querySelectorAll('td');
-                    if (cols.length >= 6) {
-                      data.push({
-                        id: i,
-                        code: cols[0].innerText.trim(),
-                        name: cols[1].innerText.trim(),
-                        total: parseInt(cols[2].innerText.trim() || 0),
-                        attended: parseInt(cols[3].innerText.trim() || 0)
-                      });
-                    }
-                  });
-                  return JSON.stringify(data);
-                } catch (e) {
-                  return 'ERROR: ' + e.toString();
-                }
+                // If table or rows aren't drawn yet, return 'WAITING' to tell the loop to try again next second
+                let table = document.querySelector('table#sample_1');
+                if (!table) return 'WAITING'; 
+
+                let rows = document.querySelectorAll('table#sample_1 tbody tr'); 
+                if (rows.length === 0) return 'WAITING';
+
+                let data = [];
+                rows.forEach((row, i) => {
+                  let cols = row.querySelectorAll('td');
+                  if (cols.length >= 6) {
+                    data.push({
+                      id: i,
+                      code: cols[0].innerText.trim(),
+                      name: cols[1].innerText.trim(),
+                      total: parseInt(cols[2].innerText.trim() || 0),
+                      attended: parseInt(cols[3].innerText.trim() || 0)
+                    });
+                  }
+                });
+                return JSON.stringify(data);
               })();
             `;
 
-            const result = await InAppBrowser.executeScript({ code: scrapeScript });
+            const scrapeResult = await InAppBrowser.executeScript({ code: scrapeScript });
             
-            // If we successfully grabbed the JSON array (not 'WAITING' or 'ERROR')
-            if (result && result.value && result.value.startsWith('[')) {
-              clearInterval(pollForData); // Stop polling
+            // If we successfully pulled data (not 'WAITING' and not an error)
+            if (scrapeResult && scrapeResult.value && scrapeResult.value !== 'WAITING') {
+              const parsed = JSON.parse(scrapeResult.value);
               
-              const parsed = JSON.parse(result.value);
               if (parsed.length > 0) {
+                clearInterval(syncLoop); // Stop the 1-second loop
+                
                 setSubjects(parsed);
-                await Preferences.set({ key: 'attendance_data', value: result.value });
+                await Preferences.set({ key: 'attendance_data', value: scrapeResult.value });
+                
+                // Mission Accomplished: Close the browser window
                 await InAppBrowser.close();
+                setIsSyncing(false); 
               }
-            } 
-            // Handle maximum timeout (ERP is down or table structure changed)
-            else if (attempts >= maxAttempts) {
-              clearInterval(pollForData);
-              await InAppBrowser.executeScript({
-                code: `alert("Sync failed: The attendance table took longer than 10 seconds to load.");`
-              });
             }
-          }, 500); // Check every half-second
+          }
+        } catch (err) {
+          // Silently ignore errors that occur during the split-second the page is refreshing
         }
-      });
+      }, 1000); // 1000ms = 1 second
+
+      // Failsafe: If something goes horribly wrong, kill the loop after 2 minutes so your phone doesn't crash
+      setTimeout(() => {
+        clearInterval(syncLoop);
+        setIsSyncing(false);
+      }, 120000);
+
     } catch (error) {
       console.error("Failed to sync:", error);
+      setIsSyncing(false);
     }
-    
-    setIsSyncing(false);
   };
 
   return (
