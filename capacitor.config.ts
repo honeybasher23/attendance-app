@@ -4,7 +4,9 @@ const config: CapacitorConfig = {
   appId: 'com.yourcollege.attendance',
   appName: 'AttendanceApp',
   webDir: 'out',
-  bundledWebRuntime: false
+  server: {
+    androidScheme: 'https'
+  }
 };
 
 export default config;
