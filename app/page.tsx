@@ -96,38 +96,63 @@ export default function Home() {
       });
 
       // 2. Listen for navigation to the attendance page
+      // 2. Listen for navigation to the attendance page
       InAppBrowser.addListener('browserPageNavigationCompleted', async (event) => {
-        // The URL in your screenshot is /ERP/Dashboard/Student/Attendance/Default.aspx
-        if (event.url.toLowerCase().includes('attendance/default.aspx')) {
+        const url = event.url.toLowerCase();
+
+        if (url.includes('attendance/default.aspx')) {
           
-          // 3. Inject the scraping script targeted at table#sample_1
-          const scrapeScript = `
-            (function() {
-              try {
-                // Target the specific table body rows to skip the header automatically
-                let rows = document.querySelectorAll('table#sample_1 tbody tr'); 
-                let data = [];
-                
-                rows.forEach((row, i) => {
-                  let cols = row.querySelectorAll('td');
+          // WAIT 3 SECONDS for the ERP server to draw the table on the screen
+          setTimeout(async () => {
+            const scrapeScript = `
+              (function() {
+                try {
+                  // Safety check: Does the table exist yet?
+                  let table = document.querySelector('table#sample_1');
+                  if (!table) return JSON.stringify({ error: 'Table not rendered' });
+
+                  let rows = document.querySelectorAll('table#sample_1 tbody tr'); 
+                  let data = [];
                   
-                  // Ensure it's a valid data row (7 columns as per your screenshot)
-                  if (cols.length >= 6) {
-                    data.push({
-                      id: i,
-                      code: cols[0].innerText.trim(),     // Subject Code
-                      name: cols[1].innerText.trim(),     // Subject Name
-                      total: parseInt(cols[2].innerText.trim() || 0),    // Total Lectures
-                      attended: parseInt(cols[3].innerText.trim() || 0)  // Present Lectures
-                    });
-                  }
+                  rows.forEach((row, i) => {
+                    let cols = row.querySelectorAll('td');
+                    if (cols.length >= 6) {
+                      data.push({
+                        id: i,
+                        code: cols[0].innerText.trim(),
+                        name: cols[1].innerText.trim(),
+                        total: parseInt(cols[2].innerText.trim() || 0),
+                        attended: parseInt(cols[3].innerText.trim() || 0)
+                      });
+                    }
+                  });
+                  return JSON.stringify(data);
+                } catch (e) {
+                  return JSON.stringify({ error: e.toString() });
+                }
+              })();
+            `;
+
+            const result = await InAppBrowser.executeScript({ code: scrapeScript });
+            
+            if (result && result.value) {
+              const parsed = JSON.parse(result.value);
+              
+              if (!parsed.error && parsed.length > 0) {
+                // Success: Save data and close window
+                setSubjects(parsed);
+                await Preferences.set({ key: 'attendance_data', value: result.value });
+                await InAppBrowser.close();
+              } else {
+                // Debugging: If it fails, tell you exactly why inside the browser
+                await InAppBrowser.executeScript({
+                  code: `alert("Scrape failed. Reason: ${parsed.error || '0 rows found'}. The table might take longer to load.");`
                 });
-                return JSON.stringify(data);
-              } catch (e) {
-                return JSON.stringify({error: e.toString()});
               }
-            })();
-          `;
+            }
+          }, 3000); // 3000 milliseconds = 3 seconds delay
+        }
+        });
 
           const result = await InAppBrowser.executeScript({ code: scrapeScript });
           
